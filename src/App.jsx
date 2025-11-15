@@ -1475,7 +1475,7 @@ export default function MainApp() {
         // **CORRECTED:** Use environment token or anonymous sign-in
         const initialAuth = async () => {
             try {
-                if (typeof __initial_auth_token !== 'undefined') {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
                     await signInAnonymously(auth);
