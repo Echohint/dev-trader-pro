@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { 
-    getAuth, 
+import {
+    getAuth,
     onAuthStateChanged,
     createUserWithEmailAndPassword,
     signInWithEmailAndPassword,
@@ -9,10 +9,10 @@ import {
     GoogleAuthProvider,
     signOut
 } from 'firebase/auth';
-import { 
-    getFirestore, 
-    doc, 
-    onSnapshot, 
+import {
+    getFirestore,
+    doc,
+    onSnapshot,
     setDoc
 } from 'firebase/firestore';
 import { setLogLevel } from "firebase/firestore";
@@ -21,19 +21,19 @@ import { setLogLevel } from "firebase/firestore";
 
 // Your provided Firebase config
 const firebaseConfig = {
-  apiKey: "AIzaSyCN2gvZ054Hqn14ihUk3b1pO0e8W-AQCWw",
-  authDomain: "dev-trader-pro.firebaseapp.com",
-  projectId: "dev-trader-pro",
-  storageBucket: "dev-trader-pro.firebasestorage.app",
-  messagingSenderId: "427094872698",
-  appId: "1:427094872698:web:873d739b58971fa62a61c3",
-  measurementId: "G-C2LFQ4LK0Y"
+    apiKey: "AIzaSyCN2gvZ054Hqn14ihUk3b1pO0e8W-AQCWw",
+    authDomain: "dev-trader-pro.firebaseapp.com",
+    projectId: "dev-trader-pro",
+    storageBucket: "dev-trader-pro.firebasestorage.app",
+    messagingSenderId: "427094872698",
+    appId: "1:427094872698:web:873d739b58971fa62a61c3",
+    measurementId: "G-C2LFQ4LK0Y"
 };
 
 // --- Constants ---
 const DEFAULT_INITIAL_CAPITAL = 50000;
 const DEFAULT_FINAL_TARGET = 1000000;
-const DEFAULT_TENURE_DAYS = 66; 
+const DEFAULT_TENURE_DAYS = 66;
 const TRADING_DAYS_PER_MONTH = 22;
 const LOT_SIZE = 100000; // Standard lot size for forex
 
@@ -68,7 +68,7 @@ try {
     auth = getAuth(app);
     db = getFirestore(app);
     googleProvider = new GoogleAuthProvider();
-    setLogLevel('error'); 
+    setLogLevel('error');
 } catch (e) {
     console.error("Firebase initialization failed:", e);
 }
@@ -77,7 +77,7 @@ try {
 const getNextTradingDay = (date) => {
     const nextDay = new Date(date);
     nextDay.setDate(nextDay.getDate() + 1);
-    while (nextDay.getDay() === 0 || nextDay.getDay() === 6) { 
+    while (nextDay.getDay() === 0 || nextDay.getDay() === 6) {
         nextDay.setDate(nextDay.getDate() + 1);
     }
     return nextDay;
@@ -98,6 +98,75 @@ const formatNumber = (num, showZero = true) => {
     if (Math.abs(number) >= 100000) return (number / 100000).toFixed(2).replace(/\.00$/, '') + ' L';
     if (Math.abs(number) >= 1000) return (number / 1000).toFixed(2).replace(/\.00$/, '') + ' K';
     return number.toLocaleString('en-IN');
+};
+
+// --- NEW: Hoisted Plan Functions ---
+const generatePlanStructure = (tenure, oldMonths = []) => {
+    const oldDaysMap = new Map();
+    oldMonths.forEach(month => month.days.forEach(day => oldDaysMap.set(day.date, day)));
+    let months = [];
+    let currentDate = new Date("2025-11-17T00:00:00.000Z"); // Fixed start date
+    if (currentDate.getDay() === 6) { currentDate.setDate(currentDate.getDate() + 2); }
+    else if (currentDate.getDay() === 0) { currentDate.setDate(currentDate.getDate() + 1); }
+    let dayCounter = 0;
+    while (dayCounter < tenure) {
+        const monthIndex = Math.floor(dayCounter / TRADING_DAYS_PER_MONTH);
+        if (!months[monthIndex]) {
+            months[monthIndex] = { id: monthIndex + 1, monthName: currentDate.toLocaleString('default', { month: 'long', year: 'numeric' }), days: [] };
+        }
+        const dateStr = currentDate.toISOString().split('T')[0];
+        const existingDayData = oldDaysMap.get(dateStr);
+        months[monthIndex].days.push({
+            day: dayCounter + 1, date: dateStr, capital: 0, target: 0, profit: 0, dailyRate: 0,
+            achieved: existingDayData?.achieved || false,
+            pnlSign: existingDayData?.pnlSign || "+",
+            actual: existingDayData?.actual || "",
+            winningTrades: existingDayData?.winningTrades || "",
+            losingTrades: existingDayData?.losingTrades || "",
+            logic: existingDayData?.logic || "",
+            rules: existingDayData?.rules || JSON.parse(JSON.stringify(DEFAULT_RULES)),
+        });
+        currentDate = getNextTradingDay(currentDate);
+        dayCounter++;
+    }
+    return months;
+};
+
+const recalculatePlan = (fullData) => {
+    const { initialCapital, finalTarget, tenure } = fullData;
+    const validTenure = tenure > 0 ? tenure : DEFAULT_TENURE_DAYS;
+    const validInitialCapital = initialCapital > 0 ? initialCapital : DEFAULT_INITIAL_CAPITAL;
+    const validFinalTarget = finalTarget > validInitialCapital ? finalTarget : validInitialCapital * 2;
+    const newMonths = JSON.parse(JSON.stringify(fullData.months));
+    const allDays = newMonths.flatMap(m => m.days);
+    const dailyRate = Math.pow(validFinalTarget / validInitialCapital, 1 / validTenure) - 1;
+    const initialDailyRate = (isNaN(dailyRate) || !isFinite(dailyRate) || dailyRate < -0.5) ? 0.01 : dailyRate;
+    let plannedCapital = validInitialCapital;
+    const plannedGoals = [];
+    for (let i = 0; i < validTenure; i++) {
+        const plannedTarget = plannedCapital * (1 + initialDailyRate);
+        const plannedProfit = plannedTarget - plannedCapital;
+        plannedGoals.push({ target: Math.round(plannedTarget), profit: Math.round(plannedProfit) });
+        plannedCapital = plannedTarget;
+    }
+    let actualCapital = validInitialCapital;
+    let totalDaysElapsed = 0;
+    for (let day of allDays) {
+        if (totalDaysElapsed >= plannedGoals.length) plannedGoals.push({ target: actualCapital, profit: 0 });
+        day.target = plannedGoals[totalDaysElapsed].target;
+        day.profit = plannedGoals[totalDaysElapsed].profit;
+        day.capital = Math.round(actualCapital);
+        day.dailyRate = (actualCapital > 0 && day.target > actualCapital) ? (day.target / actualCapital) - 1 : 0;
+        if (day.actual !== "") {
+            const actualProfit = Number(day.actual) || 0;
+            const signedProfit = day.pnlSign === '+' ? actualProfit : -actualProfit;
+            actualCapital += signedProfit;
+        } else {
+            actualCapital = day.target;
+        }
+        totalDaysElapsed++;
+    }
+    return newMonths;
 };
 
 // --- NEW: Bubble Background Component ---
@@ -152,7 +221,7 @@ const BubbleBackground = ({ theme }) => {
                     ctx.fill();
                     return true;
                 }
-                return false; 
+                return false;
             });
             if(bubblesRef.current.length > 200) {
                 bubblesRef.current.splice(0, bubblesRef.current.length - 200);
@@ -234,7 +303,7 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
     const [openOrders, setOpenOrders] = useState([]); // Store active chart orders
     
     const [selectedSymbol, setSelectedSymbol] = useState(ALL_SYMBOLS.find(s => !hiddenSymbols.includes(s.name)) || ALL_SYMBOLS[0]);
-    const [orderType, setOrderType] = useState('market'); 
+    const [orderType, setOrderType] = useState('market');
     const [lots, setLots] = useState(0.01);
     const [leverage, setLeverage] = useState(1);
     const LEVERAGE_OPTIONS = [1, 50, 100, 200, 400];
@@ -242,14 +311,55 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
     const [takeProfit, setTakeProfit] = useState('');
     const [positions, setPositions] = useState([]);
     const [tradeHistory, setTradeHistory] = useState([]);
-    const [positionsTab, setPositionsTab] = useState('open'); 
+    const [positionsTab, setPositionsTab] = useState('open');
     const [isSymbolModalOpen, setIsSymbolModalOpen] = useState(false);
-    const [mobileTab, setMobileTab] = useState('chart'); 
+    const [mobileTab, setMobileTab] = useState('chart');
     
-    const showMessage = (text, isProfit) => {
+    // Create a stable showMessage function
+    const showMessage = useCallback((text, isProfit) => {
         onNewMessage({ text, isProfit });
-    };
+    }, [onNewMessage]);
 
+    // **CORRECTED:** This function is now stable and efficient.
+    // It accepts the full `pos` object, removing the `positions` state dependency.
+    const handleClosePosition = useCallback((pos, closePrice, reason = 'Manual Close') => {
+        if (!pos) return;
+
+        const currentSymbolPrice = prices[pos.symbol];
+        if (!currentSymbolPrice && !closePrice) {
+            showMessage("Market prices unavailable, cannot close.", false);
+            return;
+        }
+
+        const exitPrice = closePrice || (pos.type === 'BUY' ? currentSymbolPrice.bid : currentSymbolPrice.ask);
+        const contractSize = (pos.symbol.includes('BTC') || pos.symbol.includes('ETH')) ? 1 : LOT_SIZE;
+        const realizedPnl = (pos.type === 'BUY' ? (exitPrice - pos.entryPrice) : (pos.entryPrice - exitPrice)) * pos.lots * contractSize;
+
+        const newHistoryTrade = { ...pos, exitPrice, closeTime: new Date().toLocaleString(), pnl: realizedPnl, reason };
+        
+        // NEW: Remove order line from chart
+        if (pos.chartOrder) {
+            try {
+                pos.chartOrder.remove();
+            } catch (e) {
+                console.error("Could not remove chart line:", e);
+            }
+        }
+
+        setTradeHistory(prev => [newHistoryTrade, ...prev]);
+        onTradeClose(realizedPnl);
+        showMessage(`Closed ${pos.symbol} for PnL: ${realizedPnl.toFixed(2)} (${reason})`, realizedPnl >= 0);
+        
+        // This is the manual close path, which is handled by setPositions in checkPriceTriggers
+        // The `currentPositions` check was flawed. We just need to filter state.
+        setPositions(prev => prev.filter(p => p.id !== pos.id));
+
+    }, [prices, onTradeClose, showMessage]); // **CORRECTED:** No longer depends on `positions`
+
+
+    // **CORRECTED:** This function's dependency array is fixed.
+    // It now correctly uses `setPositions` updater function to avoid state races
+    // and passes the full `pos` object to `handleClosePosition`.
     const checkPriceTriggers = useCallback((symbolName, bid, ask) => {
         setPositions(currentPositions => {
             const positionsToClose = [];
@@ -267,25 +377,27 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
                     else if (pos.type === 'SELL' && ask <= pos.takeProfit) { shouldClose = true; closePrice = ask; reason = 'Take Profit Hit'; }
                 }
                 if (shouldClose) {
-                    positionsToClose.push({ ...pos, closePrice, reason });
+                    // **CORRECTED:** Pass the full pos object
+                    positionsToClose.push({ pos, closePrice, reason });
                     return false;
                 }
                 return true;
             });
 
             if (positionsToClose.length > 0) {
-                positionsToClose.forEach(pos => handleClosePosition(pos.id, pos.closePrice, pos.reason, updatedPositions));
+                // Call outside the filter loop
+                positionsToClose.forEach(p => handleClosePosition(p.pos, p.closePrice, p.reason));
             }
-            return updatedPositions;
+            return updatedPositions; // Return the new state for `setPositions`
         });
-    }, []); // `handleClosePosition` is now a stable dependency
+    }, [handleClosePosition]); // **CORRECTED:** Depends on the stable handleClosePosition
 
     const prices = useSimulatedPrices(ALL_SYMBOLS, checkPriceTriggers);
 
     // Update TradingView Widget
     useEffect(() => {
         if (window.TradingView && tvWidgetRef.current && (mobileTab === 'chart' || window.innerWidth >= 768)) {
-            tvWidgetRef.current.innerHTML = ""; 
+            tvWidgetRef.current.innerHTML = "";
             const widget = new TradingView.widget({
                 "autosize": true,
                 "symbol": selectedSymbol.tv,
@@ -321,7 +433,7 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
     useEffect(() => {
         if (positions.length === 0) return;
         const interval = setInterval(() => {
-            setPositions(currentPositions => 
+            setPositions(currentPositions =>
                 currentPositions.map(pos => {
                     const currentPrice = prices[pos.symbol];
                     if (!currentPrice) return pos;
@@ -339,12 +451,13 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
                     return { ...pos, pnl, currentPrice: newPrice };
                 })
             );
-        }, 1000); 
+        }, 1000);
         return () => clearInterval(interval);
-    }, [prices, positions.length]); 
+    }, [prices, positions.length]);
 
     // NEW: Function to draw on chart
-    const drawOrderLine = (position) => {
+    // **CORRECTED:** Wrapped in useCallback
+    const drawOrderLine = useCallback((position) => {
         if (!tvWidgetInstance.current || !tvWidgetInstance.current.chart) return null;
         const chart = tvWidgetInstance.current.chart();
         const price = position.entryPrice;
@@ -367,7 +480,7 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
             console.error("Failed to draw order line:", e);
             return null;
         }
-    };
+    }, []); // Depends on nothing, as tvWidgetInstance is a ref
 
     const handleMarketOrder = (type) => {
         const currentPrice = prices[selectedSymbol.name];
@@ -406,43 +519,6 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
         setStopLoss('');
         setTakeProfit('');
     };
-
-    const handleClosePosition = useCallback((positionId, closePrice, reason = 'Manual Close', currentPositions) => {
-        // This function can be called from a filter, so it needs to be pure-ish
-        // It shouldn't call setPositions itself, but it can call the other setters
-        const pos = (currentPositions || positions).find(p => p.id === positionId);
-        if (!pos) return;
-
-        const currentSymbolPrice = prices[pos.symbol];
-        if (!currentSymbolPrice && !closePrice) {
-             showMessage("Market prices unavailable, cannot close.", false);
-             return;
-        }
-
-        const exitPrice = closePrice || (pos.type === 'BUY' ? currentSymbolPrice.bid : currentSymbolPrice.ask);
-        const contractSize = (pos.symbol.includes('BTC') || pos.symbol.includes('ETH')) ? 1 : LOT_SIZE;
-        const realizedPnl = (pos.type === 'BUY' ? (exitPrice - pos.entryPrice) : (pos.entryPrice - exitPrice)) * pos.lots * contractSize;
-
-        const newHistoryTrade = { ...pos, exitPrice, closeTime: new Date().toLocaleString(), pnl: realizedPnl, reason };
-        
-        // NEW: Remove order line from chart
-        if (pos.chartOrder) {
-            try {
-                pos.chartOrder.remove();
-            } catch (e) {
-                console.error("Could not remove chart line:", e);
-            }
-        }
-
-        setTradeHistory(prev => [newHistoryTrade, ...prev]);
-        onTradeClose(realizedPnl);
-        showMessage(`Closed ${pos.symbol} for PnL: ${realizedPnl.toFixed(2)} (${reason})`, realizedPnl >= 0);
-        
-        // This is the one state it shouldn't set if called from the price trigger
-        if (!currentPositions) {
-            setPositions(prev => prev.filter(p => p.id !== positionId));
-        }
-    }, [prices, onTradeClose, positions]);
     
     const currentSymbolPrices = prices[selectedSymbol.name];
     const contractSize = (selectedSymbol.name.includes('BTC') || selectedSymbol.name.includes('ETH')) ? 1 : LOT_SIZE;
@@ -462,12 +538,12 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
     const handleSelectSymbol = (symbol) => {
         // NEW: Clear orders from old symbol
         openOrders.forEach(order => {
-            if(order) try { order.remove() } catch(e){} 
+            if(order) try { order.remove() } catch(e){}
         });
         setOpenOrders([]);
         
         setSelectedSymbol(symbol);
-        setMobileTab('chart'); 
+        setMobileTab('chart');
     };
     
     const SymbolList = () => (
@@ -506,8 +582,8 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
         <div className="w-full p-4 flex flex-col space-y-3">
             <div className="text-center text-xs space-y-1">
                 <div><span className="text-gray-500 dark:text-gray-400">Capital: </span><span className="font-bold text-cyan-600 dark:text-cyan-400">₹{formatNumber(availableCapital, true)}</span></div>
-                 <div><span className="text-gray-500 dark:text-gray-400">Used Margin: </span><span className="font-bold">₹{formatNumber(marginUsed, true)}</span></div>
-                 <div><span className="text-gray-500 dark:text-gray-400">Free Margin: </span><span className={`font-bold text-lg ${freeMargin >= 0 ? 'text-green-500' : 'text-red-500'}`}>₹{formatNumber(freeMargin, true)}</span></div>
+                <div><span className="text-gray-500 dark:text-gray-400">Used Margin: </span><span className="font-bold">₹{formatNumber(marginUsed, true)}</span></div>
+                <div><span className="text-gray-500 dark:text-gray-400">Free Margin: </span><span className={`font-bold text-lg ${freeMargin >= 0 ? 'text-green-500' : 'text-red-500'}`}>₹{formatNumber(freeMargin, true)}</span></div>
             </div>
             <div className="flex bg-gray-300 dark:bg-gray-700 rounded-md p-1">
                 <button onClick={() => setOrderType('market')} className={`flex-1 text-center text-xs font-bold py-1.5 rounded ${orderType === 'market' ? 'bg-white dark:bg-gray-900 text-cyan-500' : 'text-gray-600 dark:text-gray-400'}`}>Market</button>
@@ -574,7 +650,8 @@ const DemoTrader = ({ onTradeClose, theme, availableCapital, onSymbolVisibilityC
                                     <td>{pos.currentPrice ? pos.currentPrice.toFixed(5) : '...'}</td>
                                     <td className="text-[10px]"><div>SL: {pos.stopLoss || 'N/A'}</div><div>TP: {pos.takeProfit || 'N/A'}</div></td>
                                     <td className={pos.pnl >= 0 ? 'text-green-600' : 'text-red-600'}>{pos.pnl.toFixed(2)}</td>
-                                    <td><button onClick={() => handleClosePosition(pos.id, null, 'Manual Close')} className="bg-yellow-600/80 text-white px-2 py-0.5 text-xs rounded">X</button></td>
+                                    {/* **CORRECTED:** Pass the full `pos` object to the handler */}
+                                    <td><button onClick={() => handleClosePosition(pos, null, 'Manual Close')} className="bg-yellow-600/80 text-white px-2 py-0.5 text-xs rounded">X</button></td>
                                 </tr>
                             ))}
                         </tbody>
@@ -673,7 +750,7 @@ const JournalDay = React.memo(({ row, activeMonthIndex, i, todayString, handleMo
                 </div>
             </div>
             <div className="mt-4 pt-4 border-t border-cyan-700/20 dark:border-cyan-500/30 no-drag">
-                 <div className="flex flex-col md:flex-row gap-6">
+                <div className="flex flex-col md:flex-row gap-6">
                     <div className="flex-1 md:w-1.5/3">
                         <h3 className="font-bold mb-2 text-left text-fuchsia-600 dark:text-fuchsia-400">DAILY PROTOCOLS</h3>
                         <div className="space-y-2 text-left">
@@ -823,101 +900,38 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
     }, [userData]);
     
     // --- DATABASE HELPERS ---
-    const generatePlanStructure = useCallback((tenure, oldMonths = []) => {
-        const oldDaysMap = new Map();
-        oldMonths.forEach(month => month.days.forEach(day => oldDaysMap.set(day.date, day)));
-        let months = [];
-        let currentDate = new Date("2025-11-17T00:00:00.000Z"); // Fixed start date
-        if (currentDate.getDay() === 6) { currentDate.setDate(currentDate.getDate() + 2); }
-        else if (currentDate.getDay() === 0) { currentDate.setDate(currentDate.getDate() + 1); }
-        let dayCounter = 0;
-        while (dayCounter < tenure) {
-            const monthIndex = Math.floor(dayCounter / TRADING_DAYS_PER_MONTH);
-            if (!months[monthIndex]) {
-                months[monthIndex] = { id: monthIndex + 1, monthName: currentDate.toLocaleString('default', { month: 'long', year: 'numeric' }), days: [] };
-            }
-            const dateStr = currentDate.toISOString().split('T')[0];
-            const existingDayData = oldDaysMap.get(dateStr);
-            months[monthIndex].days.push({
-                day: dayCounter + 1, date: dateStr, capital: 0, target: 0, profit: 0, dailyRate: 0,
-                achieved: existingDayData?.achieved || false,
-                pnlSign: existingDayData?.pnlSign || "+",
-                actual: existingDayData?.actual || "",
-                winningTrades: existingDayData?.winningTrades || "",
-                losingTrades: existingDayData?.losingTrades || "",
-                logic: existingDayData?.logic || "",
-                rules: existingDayData?.rules || JSON.parse(JSON.stringify(DEFAULT_RULES)),
-            });
-            currentDate = getNextTradingDay(currentDate);
-            dayCounter++;
-        }
-        return months;
-    }, []);
-
-    const recalculatePlan = useCallback((fullData) => {
-        const { initialCapital, finalTarget, tenure } = fullData;
-        const validTenure = tenure > 0 ? tenure : DEFAULT_TENURE_DAYS;
-        const validInitialCapital = initialCapital > 0 ? initialCapital : DEFAULT_INITIAL_CAPITAL;
-        const validFinalTarget = finalTarget > validInitialCapital ? finalTarget : validInitialCapital * 2;
-        const newMonths = JSON.parse(JSON.stringify(fullData.months));
-        const allDays = newMonths.flatMap(m => m.days);
-        const dailyRate = Math.pow(validFinalTarget / validInitialCapital, 1 / validTenure) - 1;
-        const initialDailyRate = (isNaN(dailyRate) || !isFinite(dailyRate) || dailyRate < -0.5) ? 0.01 : dailyRate;
-        let plannedCapital = validInitialCapital;
-        const plannedGoals = [];
-        for (let i = 0; i < validTenure; i++) {
-            const plannedTarget = plannedCapital * (1 + initialDailyRate);
-            const plannedProfit = plannedTarget - plannedCapital;
-            plannedGoals.push({ target: Math.round(plannedTarget), profit: Math.round(plannedProfit) });
-            plannedCapital = plannedTarget;
-        }
-        let actualCapital = validInitialCapital;
-        let totalDaysElapsed = 0;
-        for (let day of allDays) {
-            if (totalDaysElapsed >= plannedGoals.length) plannedGoals.push({ target: actualCapital, profit: 0 });
-            day.target = plannedGoals[totalDaysElapsed].target;
-            day.profit = plannedGoals[totalDaysElapsed].profit;
-            day.capital = Math.round(actualCapital);
-            day.dailyRate = (actualCapital > 0 && day.target > actualCapital) ? (day.target / actualCapital) - 1 : 0;
-            if (day.actual !== "") {
-                const actualProfit = Number(day.actual) || 0;
-                const signedProfit = day.pnlSign === '+' ? actualProfit : -actualProfit;
-                actualCapital += signedProfit;
-            } else {
-                actualCapital = day.target;
-            }
-            totalDaysElapsed++;
-        }
-        return newMonths;
-    }, []);
-
+    
+    // **CORRECTED:** This function is now stable and debounced.
     const updateFirestore = useCallback(
         (newData) => {
             if (!dataRef.current) return;
-            setData(newData); // Optimistic local update
+            // Optimistic local update is handled by the `setData` call in the handler
             if (window.firestoreTimer) clearTimeout(window.firestoreTimer);
             window.firestoreTimer = setTimeout(async () => {
                 try {
                     await setDoc(dataRef.current, newData, { merge: true });
                 } catch (error) { console.error("Error updating document:", error); }
-            }, 1000); 
+            }, 1000);
         },
-        [dataRef.current]
+        [dataRef] // dataRef.current will be stable
     );
 
-    const createNewJournal = async () => {
+    // **CORRECTED:** Renamed to be specific to the reset button.
+    // Uses hoisted functions for logic.
+    const resetJournalToDefaults = async () => {
         if (!dataRef.current) return;
         try {
             const initialTenure = DEFAULT_TENURE_DAYS;
-            const months = generatePlanStructure(initialTenure);
-            let initialData = { 
-                initialCapital: DEFAULT_INITIAL_CAPITAL, 
-                finalTarget: DEFAULT_FINAL_TARGET, 
+            const months = generatePlanStructure(initialTenure); // Uses hoisted func
+            let initialData = {
+                initialCapital: DEFAULT_INITIAL_CAPITAL,
+                finalTarget: DEFAULT_FINAL_TARGET,
                 tenure: initialTenure, months: months,
                 hiddenSymbols: [], version: 2
             };
-            initialData.months = recalculatePlan(initialData);
+            initialData.months = recalculatePlan(initialData); // Uses hoisted func
             await setDoc(dataRef.current, initialData);
+            // `onSnapshot` in MainApp will handle the state update
         } catch (error) { console.error("Error creating new journal:", error); }
     };
 
@@ -926,58 +940,81 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
         const newInitialCapital = parseInt(inputCapital, 10) || DEFAULT_INITIAL_CAPITAL;
         const newFinalTarget = parseInt(inputTarget, 10) || DEFAULT_FINAL_TARGET;
         const newTenure = parseInt(inputTenure, 10) || DEFAULT_TENURE_DAYS;
-        const newMonths = generatePlanStructure(newTenure, data.months);
-        const updatedData = { ...data, initialCapital: newInitialCapital, finalTarget: newFinalTarget, tenure: newTenure, months: newMonths };
-        updatedData.months = recalculatePlan(updatedData);
+        const newMonths = generatePlanStructure(newTenure, data.months); // Uses hoisted func
+        let updatedData = { ...data, initialCapital: newInitialCapital, finalTarget: newFinalTarget, tenure: newTenure, months: newMonths };
+        updatedData.months = recalculatePlan(updatedData); // Uses hoisted func
         setActiveMonthIndex(0);
-        updateFirestore(updatedData);
+        
+        setData(updatedData); // Optimistic update
+        updateFirestore(updatedData); // Send to Firestore
     };
     
-    const handleJournalChange = (monthIndex, dayIndex, field, value) => {
-        const newData = JSON.parse(JSON.stringify(data));
-        newData.months[monthIndex].days[dayIndex][field] = value;
-        updateFirestore(newData);
-    };
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    // This makes the prop stable for `JournalDay` memoization
+    const handleJournalChange = useCallback((monthIndex, dayIndex, field, value) => {
+        setData(prevData => {
+            const newData = JSON.parse(JSON.stringify(prevData));
+            newData.months[monthIndex].days[dayIndex][field] = value;
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [updateFirestore]);
 
-    const handleProfitInput = (monthIndex, dayIndex, value) => {
-        const newData = JSON.parse(JSON.stringify(data));
-        const day = newData.months[monthIndex].days[dayIndex];
-        day.actual = value;
-        const actualProfit = Number(value) || 0;
-        const signedProfit = day.pnlSign === '+' ? actualProfit : -actualProfit;
-        day.achieved = signedProfit >= day.profit;
-        newData.months = recalculatePlan(newData);
-        updateFirestore(newData);
-    };
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    const handleProfitInput = useCallback((monthIndex, dayIndex, value) => {
+        setData(prevData => {
+            const newData = JSON.parse(JSON.stringify(prevData));
+            const day = newData.months[monthIndex].days[dayIndex];
+            day.actual = value;
+            const actualProfit = Number(value) || 0;
+            const signedProfit = day.pnlSign === '+' ? actualProfit : -signedProfit;
+            day.achieved = signedProfit >= day.profit;
+            newData.months = recalculatePlan(newData); // Uses hoisted func
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [updateFirestore]); // `recalculatePlan` is hoisted and stable
     
-    const handleSignChange = (monthIndex, dayIndex, sign) => {
-        const newData = JSON.parse(JSON.stringify(data));
-        const day = newData.months[monthIndex].days[dayIndex];
-        day.pnlSign = sign;
-        const actualProfit = Number(day.actual) || 0;
-        const signedProfit = sign === '+' ? actualProfit : -actualProfit;
-        day.achieved = signedProfit >= day.profit;
-        newData.months = recalculatePlan(newData);
-        updateFirestore(newData);
-    };
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    const handleSignChange = useCallback((monthIndex, dayIndex, sign) => {
+        setData(prevData => {
+            const newData = JSON.parse(JSON.stringify(prevData));
+            const day = newData.months[monthIndex].days[dayIndex];
+            day.pnlSign = sign;
+            const actualProfit = Number(day.actual) || 0;
+            const signedProfit = sign === '+' ? actualProfit : -actualProfit;
+            day.achieved = signedProfit >= day.profit;
+            newData.months = recalculatePlan(newData); // Uses hoisted func
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [updateFirestore]); // `recalculatePlan` is hoisted and stable
     
-    const handleRuleChange = (monthIndex, dayIndex, ruleIndex, isChecked) => {
-        const newData = JSON.parse(JSON.stringify(data));
-        if (!newData.months[monthIndex].days[dayIndex].rules) {
-            newData.months[monthIndex].days[dayIndex].rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
-        }
-        newData.months[monthIndex].days[dayIndex].rules[ruleIndex].checked = isChecked;
-        updateFirestore(newData);
-    };
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    const handleRuleChange = useCallback((monthIndex, dayIndex, ruleIndex, isChecked) => {
+        setData(prevData => {
+            const newData = JSON.parse(JSON.stringify(prevData));
+            if (!newData.months[monthIndex].days[dayIndex].rules) {
+                newData.months[monthIndex].days[dayIndex].rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
+            }
+            newData.months[monthIndex].days[dayIndex].rules[ruleIndex].checked = isChecked;
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [updateFirestore]);
     
-    const handleSymbolVisibilityChange = (symbolName) => {
-        const currentHidden = data.hiddenSymbols || [];
-        const newHiddenSymbols = currentHidden.includes(symbolName)
-            ? currentHidden.filter(s => s !== symbolName)
-            : [...currentHidden, symbolName];
-        const newData = { ...data, hiddenSymbols: newHiddenSymbols };
-        updateFirestore(newData);
-    };
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    const handleSymbolVisibilityChange = useCallback((symbolName) => {
+        setData(prevData => {
+            const currentHidden = prevData.hiddenSymbols || [];
+            const newHiddenSymbols = currentHidden.includes(symbolName)
+                ? currentHidden.filter(s => s !== symbolName)
+                : [...currentHidden, symbolName];
+            const newData = { ...prevData, hiddenSymbols: newHiddenSymbols };
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [updateFirestore]);
 
     const { currentMonthIndex, currentDayIndex, todayData, isTodayFound } = useMemo(() => {
         if (!data) return { currentMonthIndex: -1, currentDayIndex: -1, todayData: null, isTodayFound: false };
@@ -990,29 +1027,33 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
         return { currentMonthIndex: 0, currentDayIndex: 0, todayData: data.months[0].days[0], isTodayFound: false };
     }, [data, todayString]);
 
-    const handleTradeClose = (pnl) => {
+    // **CORRECTED:** Wrapped in `useCallback` and uses updater pattern
+    const handleTradeClose = useCallback((pnl) => {
         if (!isTodayFound) {
             showModal("Date Mismatch", "Today's date is not found in your challenge plan. Cannot log trade.");
             return;
         }
-        const newData = JSON.parse(JSON.stringify(data));
-        const day = newData.months[currentMonthIndex].days[currentDayIndex];
-        const currentPnl = Number(day.actual) || 0;
-        const signedCurrentPnl = day.pnlSign === '+' ? currentPnl : -signedCurrentPnl;
-        const newTotalPnl = signedCurrentPnl + pnl;
-        day.pnlSign = newTotalPnl >= 0 ? '+' : '-';
-        day.actual = Math.abs(newTotalPnl).toFixed(2);
-        day.achieved = newTotalPnl >= day.profit;
-        newData.months = recalculatePlan(newData);
-        updateFirestore(newData);
-    };
+        setData(prevData => {
+            const newData = JSON.parse(JSON.stringify(prevData));
+            const day = newData.months[currentMonthIndex].days[currentDayIndex];
+            const currentPnl = Number(day.actual) || 0;
+            const signedCurrentPnl = day.pnlSign === '+' ? currentPnl : -currentPnl; // Corrected bug
+            const newTotalPnl = signedCurrentPnl + pnl;
+            day.pnlSign = newTotalPnl >= 0 ? '+' : '-';
+            day.actual = Math.abs(newTotalPnl).toFixed(2);
+            day.achieved = newTotalPnl >= day.profit;
+            newData.months = recalculatePlan(newData); // Uses hoisted func
+            updateFirestore(newData);
+            return newData;
+        });
+    }, [isTodayFound, currentMonthIndex, currentDayIndex, updateFirestore]); // `recalculatePlan` is hoisted
 
     const handleResetChallenge = () => {
         showModal(
             "::: CRITICAL WARNING :::",
             "This will purge all your saved journal data from the database and reset to the default plan. This cannot be undone.",
             () => {
-                createNewJournal(); 
+                resetJournalToDefaults(); // **CORRECTED:** Calls renamed function
                 closeModal();
             }
         );
@@ -1026,10 +1067,12 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
     
     const showModal = (title, message, onConfirm) => setModal({ isOpen: true, title, message, onConfirm });
     const closeModal = () => setModal({ ...modal, isOpen: false });
-    const handleTradeMessage = (msg) => {
+    
+    // **CORRECTED:** Wrapped in `useCallback` to be a stable prop
+    const handleTradeMessage = useCallback((msg) => {
         setMessage(msg);
         setTimeout(() => setMessage(null), 2500);
-    };
+    }, []);
 
     // Drag handlers
     const handleMouseMove = useCallback((e) => {
@@ -1041,7 +1084,7 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
     const handleMouseUp = useCallback(() => {
         if (!dragInfo.current) return;
         dragInfo.current.element.classList.remove('is-dragging');
-        dragInfo.current.element.style.transform = ''; 
+        dragInfo.current.element.style.transform = '';
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mouseup', handleMouseUp);
         dragInfo.current = null;
@@ -1069,6 +1112,7 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
         const losingTrades = completedDays.reduce((acc, day) => acc + (Number(day.losingTrades) || 0), 0);
         return { pnl, profitDays, lossDays, winningTrades, losingTrades };
     }, [data, activeMonthIndex]);
+    
     const startCapitalForMonth = useMemo(() => {
         if (!data || activeMonthIndex === 0) return data ? data.initialCapital : 0;
         const allDays = data.months.flatMap(m => m.days);
@@ -1092,7 +1136,7 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
             <Modal isOpen={modal.isOpen} title={modal.title} message={modal.message} onConfirm={modal.onConfirm} onCancel={closeModal} />
             {message && (<div className={`fixed top-24 left-1/2 -translate-x-1/2 z-50 p-4 rounded-lg shadow-xl backdrop-blur-sm border ${message.isProfit ? 'bg-green-800/80 border-green-500 text-white' : 'bg-red-800/80 border-red-500 text-white'}`}>{message.text}</div>)}
 
-             <button onClick={toggleTheme} className="absolute top-4 right-4 sm:top-6 sm:right-6 px-4 py-2 rounded-lg bg-white/50 dark:bg-black/70 backdrop-blur-sm z-10">...</button>
+                <button onClick={toggleTheme} className="absolute top-4 right-4 sm:top-6 sm:right-6 px-4 py-2 rounded-lg bg-white/50 dark:bg-black/70 backdrop-blur-sm z-10">...</button>
             <div className="absolute top-4 left-4 sm:top-6 sm:left-6 z-10 flex gap-2 items-center">
                 <div className="h-10 w-10 bg-cyan-500 rounded-full flex items-center justify-center text-white font-bold">{user.email ? user.email[0].toUpperCase() : 'U'}</div>
                 <button onClick={onSignOut} className="text-xs text-gray-400 hover:text-white">Sign Out</button>
@@ -1108,30 +1152,30 @@ const JournalAppComponent = ({ user, userData, onSignOut }) => {
                 <div className="flex flex-col sm:flex-row justify-center items-center gap-4">
                     <div className="flex flex-col items-center">
                         <label className="text-xs text-gray-500 dark:text-gray-400 mb-1">START CAPITAL</label>
-                         <div className="flex items-center bg-white/50 dark:bg-black/50 border border-cyan-700/30 dark:border-cyan-500/50 focus-within:ring-2 focus-within:ring-cyan-400">
-                             <span className="px-2 text-gray-500">₹</span>
-                             <input type="number" value={inputCapital} onChange={e => setInputCapital(e.target.value)} className="bg-transparent text-center p-2 w-40 focus:outline-none" />
-                         </div>
+                            <div className="flex items-center bg-white/50 dark:bg-black/50 border border-cyan-700/30 dark:border-cyan-500/50 focus-within:ring-2 focus-within:ring-cyan-400">
+                                <span className="px-2 text-gray-500">₹</span>
+                                <input type="number" value={inputCapital} onChange={e => setInputCapital(e.target.value)} className="bg-transparent text-center p-2 w-40 focus:outline-none" />
+                            </div>
                     </div>
                     <div className="flex flex-col items-center">
                         <label className="text-xs text-gray-500 dark:text-gray-400 mb-1">OVERALL TARGET</label>
                         <div className="flex items-center bg-white/50 dark:bg-black/50 border border-cyan-700/30 dark:border-cyan-500/50 focus-within:ring-2 focus-within:ring-cyan-400">
-                             <span className="px-2 text-gray-500">₹</span>
-                             <input type="number" value={inputTarget} onChange={e => setInputTarget(e.target.value)} className="bg-transparent text-center p-2 w-40 focus:outline-none" />
-                         </div>
+                            <span className="px-2 text-gray-500">₹</span>
+                            <input type="number" value={inputTarget} onChange={e => setInputTarget(e.target.value)} className="bg-transparent text-center p-2 w-40 focus:outline-none" />
+                        </div>
                     </div>
-                     <div className="flex flex-col items-center">
+                        <div className="flex flex-col items-center">
                         <label className="text-xs text-gray-500 dark:text-gray-400 mb-1">TENURE (DAYS)</label>
                         <input type="number" value={inputTenure} onChange={e => setInputTenure(e.target.value)} className="bg-white/50 dark:bg-black/50 border border-cyan-700/30 dark:border-cyan-500/50 text-center p-2 w-48 focus:outline-none focus:ring-2 focus:ring-cyan-400" />
                     </div>
-                     <button onClick={handleUpdateTargets} className="bg-cyan-600/80 hover:bg-cyan-500/80 border border-cyan-400 backdrop-blur-sm text-white px-6 py-2 mt-2 sm:mt-5 font-bold shadow-[0_0_10px_rgba(0,255,255,0.5)] transition-all">SET & RECALCULATE</button>
+                        <button onClick={handleUpdateTargets} className="bg-cyan-600/80 hover:bg-cyan-500/80 border border-cyan-400 backdrop-blur-sm text-white px-6 py-2 mt-2 sm:mt-5 font-bold shadow-[0_0_10px_rgba(0,255,255,0.5)] transition-all">SET & RECALCULATE</button>
                 </div>
             </div>
             
             <div className="w-full max-w-7xl mb-4 z-10">
-                <DemoTrader 
-                    onTradeClose={handleTradeClose} 
-                    theme={theme} 
+                <DemoTrader
+                    onTradeClose={handleTradeClose}
+                    theme={theme}
                     availableCapital={tradingCapital}
                     hiddenSymbols={data.hiddenSymbols || []}
                     onSymbolVisibilityChange={handleSymbolVisibilityChange}
@@ -1222,7 +1266,11 @@ export default function MainApp() {
                 } else {
                     console.log("No user data. Creating new journal...");
                     // Create a new journal, and set temp data so we don't flash the login screen
-                    setUserData({ initialCapital: DEFAULT_INITIAL_CAPITAL, finalTarget: DEFAULT_FINAL_TARGET, tenure: DEFAULT_TENURE_DAYS, months: [], hiddenSymbols: [] }); 
+                    // **CORRECTED:** Use hoisted function
+                    const initialTenure = DEFAULT_TENURE_DAYS;
+                    const months = generatePlanStructure(initialTenure);
+                    let tempData = { initialCapital: DEFAULT_INITIAL_CAPITAL, finalTarget: DEFAULT_FINAL_TARGET, tenure: initialTenure, months: months, hiddenSymbols: [] };
+                    setUserData(tempData);
                     createNewJournal(userDocRef);
                 }
                 setDbLoading(false);
@@ -1238,54 +1286,24 @@ export default function MainApp() {
     }, [user]);
     
     // Helper to create journal (needs ref passed)
+    // **CORRECTED:** Uses hoisted functions for logic
     const createNewJournal = async (userDocRef) => {
         try {
             const initialTenure = DEFAULT_TENURE_DAYS;
-            const months = generatePlanStructure(initialTenure);
-            let initialData = { 
-                initialCapital: DEFAULT_INITIAL_CAPITAL, 
-                finalTarget: DEFAULT_FINAL_TARGET, 
+            const months = generatePlanStructure(initialTenure); // Uses hoisted func
+            let initialData = {
+                initialCapital: DEFAULT_INITIAL_CAPITAL,
+                finalTarget: DEFAULT_FINAL_TARGET,
                 tenure: initialTenure, months: months,
                 hiddenSymbols: [], version: 2
             };
-            // Note: Recalculate is not needed here as it's part of the component
+            // **CORRECTED:** Calculate plan before saving
+            initialData.months = recalculatePlan(initialData); // Uses hoisted func
             await setDoc(userDocRef, initialData);
             console.log("New journal created.");
         } catch (error) { console.error("Error creating new journal:", error); }
     };
     
-    // Helper for generating plan structure (needed for createNewJournal)
-    const generatePlanStructure = useCallback((tenure, oldMonths = []) => {
-        const oldDaysMap = new Map();
-        oldMonths.forEach(month => month.days.forEach(day => oldDaysMap.set(day.date, day)));
-        let months = [];
-        let currentDate = new Date("2025-11-17T00:00:00.000Z"); // Fixed start date
-        if (currentDate.getDay() === 6) { currentDate.setDate(currentDate.getDate() + 2); }
-        else if (currentDate.getDay() === 0) { currentDate.setDate(currentDate.getDate() + 1); }
-        let dayCounter = 0;
-        while (dayCounter < tenure) {
-            const monthIndex = Math.floor(dayCounter / TRADING_DAYS_PER_MONTH);
-            if (!months[monthIndex]) {
-                months[monthIndex] = { id: monthIndex + 1, monthName: currentDate.toLocaleString('default', { month: 'long', year: 'numeric' }), days: [] };
-            }
-            const dateStr = currentDate.toISOString().split('T')[0];
-            const existingDayData = oldDaysMap.get(dateStr);
-            months[monthIndex].days.push({
-                day: dayCounter + 1, date: dateStr, capital: 0, target: 0, profit: 0, dailyRate: 0,
-                achieved: existingDayData?.achieved || false,
-                pnlSign: existingDayData?.pnlSign || "+",
-                actual: existingDayData?.actual || "",
-                winningTrades: existingDayData?.winningTrades || "",
-                losingTrades: existingDayData?.losingTrades || "",
-                logic: existingDayData?.logic || "",
-                rules: existingDayData?.rules || JSON.parse(JSON.stringify(DEFAULT_RULES)),
-            });
-            currentDate = getNextTradingDay(currentDate);
-            dayCounter++;
-        }
-        return months;
-    }, []);
-
     // Render logic
     if (authLoading || !appId) {
         return (
@@ -1315,10 +1333,10 @@ export default function MainApp() {
                 </div>
             ) : (
                 // 3. User is Signed In and data is loaded
-                <JournalAppComponent 
-                    user={user} 
-                    userData={userData} 
-                    onSignOut={() => signOut(auth)} 
+                <JournalAppComponent
+                    user={user}
+                    userData={userData}
+                    onSignOut={() => signOut(auth)}
                 />
             )}
         </div>
